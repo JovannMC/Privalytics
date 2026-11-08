@@ -14,7 +14,7 @@ export default defineConfig(({ mode }) => {
 	return {
 		server: {
 			host: env.HOST ?? '127.0.0.1',
-			port: Number(env.PORT ?? 5173),
+			port: Number(env.PORT ?? 5174),
 			strictPort: true
 		},
 		plugins: [

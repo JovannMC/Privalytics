@@ -9,11 +9,19 @@ const CORS_HEADERS = {
 
 export const GET: RequestHandler = ({ params, url }) => {
 	const requestedDays = url.searchParams.get('days');
-
 	const days = requestedDays === null ? 30 : Number(requestedDays);
-	if (!Number.isInteger(days) || days < 1)
+	if (!Number.isSafeInteger(days) || days < 1)
 		return Response.json(
 			{ error: { code: 'invalid_days', message: 'days must be a positive integer' } },
+			{ status: 400, headers: CORS_HEADERS }
+		);
+
+	const now = new Date();
+	const firstDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+	firstDay.setUTCDate(firstDay.getUTCDate() - days + 1);
+	if (!Number.isFinite(firstDay.getTime()))
+		return Response.json(
+			{ error: { code: 'invalid_days', message: 'days is too large' } },
 			{ status: 400, headers: CORS_HEADERS }
 		);
 
@@ -24,7 +32,9 @@ export const GET: RequestHandler = ({ params, url }) => {
 			{ status: 404, headers: CORS_HEADERS }
 		);
 
-	return Response.json(summary, { headers: CORS_HEADERS });
+	return Response.json(summary, {
+		headers: { ...CORS_HEADERS, 'Cache-Control': 'public, max-age=60' }
+	});
 };
 
 export const OPTIONS: RequestHandler = () =>

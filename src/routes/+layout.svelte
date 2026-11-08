@@ -1,5 +1,6 @@
 <script lang="ts">
-	import './layout.css';
+	// TODO: actual design for the UI
+	// import './layout.css';
 	import favicon from '#lib/assets/favicon.svg';
 	import type { LayoutProps } from './$types';
 

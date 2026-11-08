@@ -24,18 +24,22 @@ const SCHEMA = `
 	CREATE INDEX IF NOT EXISTS entities_last_seen_at
 		ON entities (last_seen_at);
 
-	CREATE TABLE IF NOT EXISTS entity_activity (
+	CREATE TABLE IF NOT EXISTS entity_registry (
 		project_slug TEXT NOT NULL,
 		entity_id TEXT NOT NULL,
-		activity_date TEXT NOT NULL,
-		PRIMARY KEY (project_slug, entity_id, activity_date),
-		FOREIGN KEY (project_slug, entity_id)
-			REFERENCES entities (project_slug, entity_id)
-			ON DELETE CASCADE
+		first_seen_at TEXT NOT NULL,
+		PRIMARY KEY (project_slug, entity_id)
 	) WITHOUT ROWID;
 
-	CREATE INDEX IF NOT EXISTS entity_activity_date
-		ON entity_activity (activity_date);
+	CREATE TABLE IF NOT EXISTS daily_activity (
+		project_slug TEXT NOT NULL,
+		activity_date TEXT NOT NULL,
+		entity_count INTEGER NOT NULL CHECK (entity_count >= 0),
+		PRIMARY KEY (project_slug, activity_date)
+	) WITHOUT ROWID;
+
+	INSERT OR IGNORE INTO entity_registry (project_slug, entity_id, first_seen_at)
+		SELECT project_slug, entity_id, first_seen_at FROM entities;
 `;
 
 let connection: DatabaseConnection | undefined;
@@ -91,6 +95,17 @@ export function saveEntityReport(report: EntityReport): void {
 	database.transaction(() => {
 		database
 			.prepare(
+				'INSERT OR IGNORE INTO entity_registry (project_slug, entity_id, first_seen_at) VALUES (?, ?, ?)'
+			)
+			.run(project.slug, report.entityId, timestamp);
+
+		const previous = database
+			.prepare('SELECT last_seen_at FROM entities WHERE project_slug = ? AND entity_id = ?')
+			.get(project.slug, report.entityId) as { last_seen_at: string } | undefined;
+		const firstReportToday = previous?.last_seen_at.slice(0, 10) !== activityDate;
+
+		database
+			.prepare(
 				`
 				INSERT INTO entities (
 					project_slug, entity_id, values_json, first_seen_at, last_seen_at
@@ -103,11 +118,18 @@ export function saveEntityReport(report: EntityReport): void {
 			)
 			.run(project.slug, report.entityId, JSON.stringify(values), timestamp, timestamp);
 
-		database
-			.prepare(
-				'INSERT OR IGNORE INTO entity_activity (project_slug, entity_id, activity_date) VALUES (?, ?, ?)'
-			)
-			.run(project.slug, report.entityId, activityDate);
+		if (firstReportToday) {
+			database
+				.prepare(
+					`
+					INSERT INTO daily_activity (project_slug, activity_date, entity_count)
+					VALUES (?, ?, 1)
+					ON CONFLICT (project_slug, activity_date) DO UPDATE SET
+						entity_count = daily_activity.entity_count + 1
+				`
+				)
+				.run(project.slug, activityDate);
+		}
 	})();
 }
 
@@ -119,6 +141,8 @@ export function getProjectSummary(
 	const project = getProject(projectSlug);
 	if (!project) return undefined;
 	if (!Number.isFinite(now.getTime())) throw new Error('Summary time must be valid');
+	if (!Number.isSafeInteger(days) || days < 1)
+		throw new Error('Summary days must be a positive integer');
 
 	// "active" entities are those that have reported in the last 30 days
 	// TODO: configurable?
@@ -128,11 +152,28 @@ export function getProjectSummary(
 		.prepare('SELECT COUNT(*) AS count FROM entities WHERE project_slug = ? AND last_seen_at >= ?')
 		.get(project.slug, activeSince) as { count: number };
 	const activeEntityCount = activeResult.count;
+	const totalResult = database
+		.prepare('SELECT COUNT(*) AS count FROM entity_registry WHERE project_slug = ?')
+		.get(project.slug) as { count: number };
+	const totalEntityCount = totalResult.count;
 
 	const fields = project.fields.map((field) => {
-		const rows = database
-			.prepare(
-				`
+		const multipleEnum = field.type === 'enum' && field.multiple === true;
+		const jsonPath = `$.${JSON.stringify(field.key)}`;
+		const rows = multipleEnum
+			? (database
+					.prepare(
+						`
+						SELECT field_value.value, field_value.type, COUNT(*) AS count
+						FROM entities, json_each(entities.values_json, ?) AS field_value
+						WHERE entities.project_slug = ? AND entities.last_seen_at >= ?
+						GROUP BY field_value.value, field_value.type
+					`
+					)
+					.all(jsonPath, project.slug, activeSince) as FieldCountRow[])
+			: (database
+					.prepare(
+						`
 				SELECT value, type, COUNT(*) AS count
 				FROM entities, json_each(entities.values_json)
 				WHERE entities.project_slug = ?
@@ -140,20 +181,31 @@ export function getProjectSummary(
 					AND json_each.key = ?
 				GROUP BY value, type
 			`
-			)
-			.all(project.slug, activeSince, field.key) as FieldCountRow[];
+					)
+					.all(project.slug, activeSince, field.key) as FieldCountRow[]);
 
 		const counts = new Map<string, number>();
 		for (const row of rows) {
 			const isTrue = row.type === 'true';
 			const isFalse = row.type === 'false';
-			if (!isTrue && !isFalse && typeof row.value !== 'string') continue;
+			const isNumber = row.type === 'integer' || row.type === 'real';
+			if (!isTrue && !isFalse && !isNumber && typeof row.value !== 'string') continue;
 
 			const key = isTrue ? 'true' : isFalse ? 'false' : String(row.value);
 			counts.set(key, row.count);
 		}
 
-		const reportingEntities = [...counts.values()].reduce((sum, count) => sum + count, 0);
+		const reportingEntities = multipleEnum
+			? (
+					database
+						.prepare(
+							`SELECT COUNT(*) AS count FROM entities
+							 WHERE project_slug = ? AND last_seen_at >= ?
+							 AND json_type(values_json, ?) IS NOT NULL`
+						)
+						.get(project.slug, activeSince, jsonPath) as { count: number }
+				).count
+			: [...counts.values()].reduce((sum, count) => sum + count, 0);
 		const coveragePercent =
 			activeEntityCount === 0 ? 0 : Math.round((reportingEntities / activeEntityCount) * 100);
 
@@ -161,6 +213,7 @@ export function getProjectSummary(
 			key: field.key,
 			label: field.label,
 			type: field.type,
+			multiple: multipleEnum,
 			required: field.required,
 			reportingEntities,
 			coveragePercent,
@@ -170,37 +223,36 @@ export function getProjectSummary(
 
 	// daily activity count for last `days` days
 	const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+	const activityEndDate = today.toISOString().slice(0, 10);
 	const firstDay = new Date(today);
 	firstDay.setUTCDate(firstDay.getUTCDate() - days + 1);
+	if (!Number.isFinite(firstDay.getTime())) throw new Error('Summary day range is too large');
+	const activityStartDate = firstDay.toISOString().slice(0, 10);
 	const activityRows = database
 		.prepare(
 			`
-			SELECT activity_date, COUNT(*) AS count
-			FROM entity_activity
+			SELECT activity_date, entity_count AS count
+			FROM daily_activity
 			WHERE project_slug = ? AND activity_date >= ?
-			GROUP BY activity_date
+			ORDER BY activity_date
 		`
 		)
-		.all(project.slug, firstDay.toISOString().slice(0, 10)) as {
+		.all(project.slug, activityStartDate) as {
 		activity_date: string;
 		count: number;
 	}[];
-	const activityCounts = new Map(
-		activityRows.map(({ activity_date, count }) => [activity_date, count])
-	);
-
-	const dailyActivity: ProjectSummary['dailyActivity'] = [];
-	for (let offset = days - 1; offset >= 0; offset--) {
-		const date = new Date(today);
-		date.setUTCDate(today.getUTCDate() - offset);
-		const key = date.toISOString().slice(0, 10);
-		dailyActivity.push({ date: key, entityCount: activityCounts.get(key) ?? 0 });
-	}
+	const dailyActivity = activityRows.map(({ activity_date, count }) => ({
+		date: activity_date,
+		entityCount: count
+	}));
 
 	return {
 		project: { slug: project.slug, title: project.title, description: project.description },
+		totalEntityCount,
 		activeEntityCount,
 		activityDays: days,
+		activityStartDate,
+		activityEndDate,
 		fields,
 		dailyActivity
 	};
@@ -208,16 +260,20 @@ export function getProjectSummary(
 
 export interface ProjectSummary {
 	project: Pick<AnalyticsProject, 'slug' | 'title' | 'description'>;
+	totalEntityCount: number;
 	activeEntityCount: number;
 	activityDays: number;
+	activityStartDate: string;
+	activityEndDate: string;
 	fields: {
 		key: string;
 		label: string;
 		type: ProjectField['type'];
+		multiple: boolean;
 		required: boolean;
 		reportingEntities: number;
 		coveragePercent: number;
-		distribution: { value: string | boolean; label: string; count: number }[];
+		distribution: { value: string | number | boolean; label: string; count: number }[];
 	}[];
 	dailyActivity: { date: string; entityCount: number }[];
 }
@@ -243,11 +299,15 @@ function zeroCountDistribution(field: ProjectField, counts: Map<string, number>)
 		}));
 	}
 
-	// order by count then by version text (e.g. 1.0.0 < 1.0.1 < 1.1.0 < 2.0.0)
+	// put the most common value first then sort numbers numerically and other values naturally
 	return [...counts.entries()]
 		.map(([value, count]) => ({ value, label: value, count }))
 		.sort(
-			(a, b) => b.count - a.count || a.value.localeCompare(b.value, undefined, { numeric: true })
+			(a, b) =>
+				b.count - a.count ||
+				(field.type === 'number'
+					? Number(a.value) - Number(b.value)
+					: a.value.localeCompare(b.value, undefined, { numeric: true }))
 		);
 }
 
