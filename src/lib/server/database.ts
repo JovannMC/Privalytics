@@ -10,6 +10,8 @@ import {
 } from './project-schema';
 
 type DatabaseConnection = InstanceType<typeof Database>;
+const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const SNAPSHOT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const SCHEMA = `
 	CREATE TABLE IF NOT EXISTS entities (
@@ -43,13 +45,7 @@ const SCHEMA = `
 `;
 
 let connection: DatabaseConnection | undefined;
-
-function databasePath(): string {
-	const configuredPath = process.env.DATABASE_PATH?.trim();
-	if (configuredPath === '') throw new Error('DATABASE_PATH must not be empty');
-	const path = configuredPath || './data/privalytics.sqlite';
-	return isAbsolute(path) ? path : resolve(process.cwd(), path);
-}
+let cleanupTimer: ReturnType<typeof setInterval> | undefined;
 
 export function initDatabase(): DatabaseConnection {
 	if (connection) return connection;
@@ -63,6 +59,15 @@ export function initDatabase(): DatabaseConnection {
 		database.pragma('foreign_keys = ON');
 		database.pragma('busy_timeout = 5000');
 		database.exec(SCHEMA);
+		deleteStaleSnapshots(database);
+		cleanupTimer = setInterval(() => {
+			try {
+				deleteStaleSnapshots(database);
+			} catch (error) {
+				console.error('Failed to clean up stale entity snapshots:', error);
+			}
+		}, SNAPSHOT_CLEANUP_INTERVAL_MS);
+		cleanupTimer.unref();
 		connection = database;
 		return database;
 	} catch (error) {
@@ -258,6 +263,11 @@ export function getProjectSummary(
 	};
 }
 
+export function cleanupStaleEntitySnapshots(now = new Date()): number {
+	if (!Number.isFinite(now.getTime())) throw new Error('Cleanup time must be valid');
+	return deleteStaleSnapshots(initDatabase(), now);
+}
+
 export interface ProjectSummary {
 	project: Pick<AnalyticsProject, 'slug' | 'title' | 'description'>;
 	totalEntityCount: number;
@@ -277,6 +287,19 @@ export interface ProjectSummary {
 	}[];
 	dailyActivity: { date: string; entityCount: number }[];
 }
+
+function databasePath(): string {
+	const configuredPath = process.env.DATABASE_PATH?.trim();
+	if (configuredPath === '') throw new Error('DATABASE_PATH must not be empty');
+	const path = configuredPath || './data/privalytics.sqlite';
+	return isAbsolute(path) ? path : resolve(process.cwd(), path);
+}
+
+function deleteStaleSnapshots(database: DatabaseConnection, now = new Date()): number {
+	const olderThan = new Date(now.getTime() - SNAPSHOT_RETENTION_MS).toISOString();
+	return database.prepare('DELETE FROM entities WHERE last_seen_at < ?').run(olderThan).changes;
+}
+
 
 function getProject(slug: string): AnalyticsProject | undefined {
 	return projectDefinitions.find((project) => project.slug === slug);

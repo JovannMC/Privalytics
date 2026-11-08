@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+.svelte-kit
+build
+data
+coverage
+*.sqlite
+*.sqlite-*
+testing

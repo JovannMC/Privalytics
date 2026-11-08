@@ -1,0 +1,19 @@
+services:
+  privalytics:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - '127.0.0.1:3000:3000'
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_PATH: /data/privalytics.sqlite
+      ENTITY_REPORT_RATE_LIMIT: ${ENTITY_REPORT_RATE_LIMIT:-12}
+      PROJECT_REPORT_RATE_LIMIT: ${PROJECT_REPORT_RATE_LIMIT:-600}
+    volumes:
+      - privalytics-data:/data
+
+volumes:
+  privalytics-data:
+    name: privalytics-data
