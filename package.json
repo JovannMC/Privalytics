@@ -8,7 +8,13 @@
 	},
 	"imports": {
 		"#lib": "./src/lib/index.js",
-		"#lib/*": "./src/lib/*"
+		"#lib/*": "./src/lib/*",
+		"#routes": "./src/routes/",
+		"#routes/*": "./src/routes/*",
+		"#api": "./src/routes/api/",
+		"#api/*": "./src/routes/api/*",
+		"#root": "./",
+		"#root/*": "./*"
 	},
 	"scripts": {
 		"dev": "vite dev",
@@ -46,6 +52,7 @@
 	},
 	"dependencies": {
 		"better-sqlite3": "^13.0.3",
-		"semver": "^7.8.6"
+		"semver": "^7.8.6",
+		"uuid": "^14.0.3"
 	}
 }

@@ -3,10 +3,13 @@ import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, loadEnv } from 'vite';
 
+const validEnvs = ['DATABASE_PATH', 'PROJECT_REPORT_RATE_LIMIT', 'ENTITY_REPORT_RATE_LIMIT'];
+
 export default defineConfig(({ mode }) => {
 	const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env };
-	if (process.env.DATABASE_PATH === undefined && env.DATABASE_PATH !== undefined)
-		process.env.DATABASE_PATH = env.DATABASE_PATH;
+	for (const name of validEnvs) {
+		if (process.env[name] === undefined && env[name] !== undefined) process.env[name] = env[name];
+	}
 
 	return {
 		server: {
