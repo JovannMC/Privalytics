@@ -4,9 +4,8 @@ services:
     restart: unless-stopped
     init: true
     ports:
-      - '127.0.0.1:${HOST_PORT:-3000}:${PORT:-3000}'
+      - '${PORT:-3000}:3000'
     environment:
-      HOST: 0.0.0.0
       PORT: ${PORT:-3000}
       DATABASE_PATH: ${DATABASE_PATH:-/data/privalytics.sqlite}
       ENTITY_REPORT_RATE_LIMIT: ${ENTITY_REPORT_RATE_LIMIT:-12}
